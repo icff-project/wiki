@@ -10,9 +10,10 @@
 
 import { useNodeViewEditable } from '@/composables/useNodeViewEditable';
 import { NodeViewWrapper } from '@tiptap/vue-3';
-import { computed, ref } from 'vue';
-import VuePdfEmbed from 'vue-pdf-embed';
+import { computed, defineAsyncComponent, ref } from 'vue';
 import PdfViewerModal from './PdfViewerModal.vue';
+
+const VuePdfEmbed = defineAsyncComponent(() => import('vue-pdf-embed'));
 
 const props = defineProps({
 	node: {
@@ -194,7 +195,7 @@ function closeViewer() {
 
 .wiki-pdf-icon {
 	flex-shrink: 0;
-	color: var(--ink-red-5, #dc2626);
+	color: var(--ink-red-4, #dc2626);
 }
 
 .wiki-pdf-name {
@@ -292,7 +293,7 @@ function closeViewer() {
 }
 
 .wiki-pdf-error-body {
-	color: var(--ink-red-5, #dc2626);
+	color: var(--ink-red-4, #dc2626);
 }
 
 .wiki-pdf-spinner {

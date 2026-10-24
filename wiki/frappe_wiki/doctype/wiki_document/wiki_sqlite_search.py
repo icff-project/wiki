@@ -4,6 +4,9 @@ from typing import ClassVar
 import frappe
 from frappe.search.sqlite_search import SQLiteSearch
 
+# Frappe v15 inserts a new row on every index_doc and never drops the old one.
+INDEX_DOC_APPENDS = int(frappe.__version__.split(".", 1)[0]) < 16
+
 
 class WikiSQLiteSearch(SQLiteSearch):
 	INDEX_NAME = "wiki_search.db"
@@ -40,6 +43,11 @@ class WikiSQLiteSearch(SQLiteSearch):
 			if prepared.get("content"):
 				prepared["content"] = self._strip_markdown(prepared["content"])
 		return prepared
+
+	def index_doc(self, doctype, docname):
+		if INDEX_DOC_APPENDS:
+			self.remove_doc(doctype, docname)
+		super().index_doc(doctype, docname)
 
 	def _strip_markdown(self, text):
 		"""Convert markdown to plain text for cleaner search indexing"""
@@ -90,11 +98,15 @@ class WikiSQLiteSearch(SQLiteSearch):
 
 
 def enqueue_reindex(docnames: list[str]):
-	"""Queue Wiki Documents for search re-indexing.
+	"""Re-index Wiki Documents after a merge.
 
 	Merge fast paths write content with raw ``frappe.db.set_value``, which
-	skips the framework's on_update hook that normally queues the re-index —
-	without this, the search index keeps serving the pre-merge content.
+	skips the framework's on_update hook that normally triggers the re-index,
+	so without this the search index keeps serving the pre-merge content.
+
+	Goes through ``index_doc`` rather than the framework's queue table: the
+	queue only exists on Frappe develop, while ``index_doc`` is present on
+	version-16 too (indexing inline there, queueing on develop).
 	"""
 	search = WikiSQLiteSearch()
 	if not (search.is_search_enabled() and search.index_exists()):
@@ -102,11 +114,11 @@ def enqueue_reindex(docnames: list[str]):
 
 	try:
 		for docname in docnames:
-			search.add_to_queue(f"Wiki Document:{docname}")
+			search.index_doc("Wiki Document", docname)
 	except Exception:
 		frappe.log_error(
-			title="Wiki Search Reindex Queue Error",
-			message=f"Failed to queue Wiki Documents for re-indexing: {docnames}",
+			title="Wiki Search Reindex Error",
+			message=f"Failed to re-index Wiki Documents: {docnames}",
 		)
 
 

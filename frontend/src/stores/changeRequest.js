@@ -66,26 +66,6 @@ export const useChangeRequestStore = defineStore('changeRequest', () => {
 		url: 'wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request.approve_change_request',
 	});
 
-	const createPageResource = createResource({
-		url: 'wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request.create_cr_page',
-	});
-
-	const updatePageResource = createResource({
-		url: 'wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request.update_cr_page',
-	});
-
-	const deletePageResource = createResource({
-		url: 'wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request.delete_cr_page',
-	});
-
-	const movePageResource = createResource({
-		url: 'wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request.move_cr_page',
-	});
-
-	const reorderChildrenResource = createResource({
-		url: 'wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request.reorder_cr_children',
-	});
-
 	const applyOperationsResource = createResource({
 		url: 'wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request.apply_cr_operations',
 	});
@@ -206,9 +186,6 @@ export const useChangeRequestStore = defineStore('changeRequest', () => {
 			mergeChangeRequestResource.loading ||
 			approveChangeRequestResource.loading,
 	);
-	const isCreatingPage = computed(() => createPageResource.loading);
-	const isUpdatingPage = computed(() => updatePageResource.loading);
-	const isDeletingPage = computed(() => deletePageResource.loading);
 
 	const canSubmit = computed(() => {
 		return (
@@ -224,82 +201,25 @@ export const useChangeRequestStore = defineStore('changeRequest', () => {
 		);
 	});
 
-	async function createPage(
-		changeRequestName,
-		parentKey,
-		title,
-		content,
-		isGroup = false,
-		isExternalLink = false,
-		externalUrl = null,
-		isTab = false,
-		tabIcon = null,
-		route = null,
-	) {
-		return await createPageResource.submit({
-			name: changeRequestName,
-			parent_key: parentKey,
-			title,
-			content,
-			is_group: isGroup,
-			is_published: true,
-			is_external_link: isExternalLink,
-			external_url: externalUrl,
-			is_tab: isTab,
-			tab_icon: tabIcon,
-			route,
-		});
-	}
-
-	async function updatePage(changeRequestName, docKey, fields) {
-		return await updatePageResource.submit({
-			name: changeRequestName,
-			doc_key: docKey,
-			fields,
-		});
-	}
-
-	async function deletePage(changeRequestName, docKey) {
-		return await deletePageResource.submit({
-			name: changeRequestName,
-			doc_key: docKey,
-		});
-	}
-
-	async function movePage(
-		changeRequestName,
-		docKey,
-		newParentKey,
-		newOrderIndex,
-	) {
-		return await movePageResource.submit({
-			name: changeRequestName,
-			doc_key: docKey,
-			new_parent_key: newParentKey,
-			new_order_index: newOrderIndex,
-		});
-	}
-
-	async function reorderChildren(changeRequestName, parentKey, orderedDocKeys) {
-		return await reorderChildrenResource.submit({
-			name: changeRequestName,
-			parent_key: parentKey,
-			ordered_doc_keys: orderedDocKeys,
-		});
-	}
-
 	// Batched mutation entrypoint. The backend applies the whole list atomically
 	// inside its request transaction, returns a temp_key_map for any newly
-	// created nodes, the canonical affected items, deleted doc_keys, and the
-	// new operation_version. Callers should pass the last `operation_version`
+	// created nodes, the canonical affected items, deleted doc_keys, the
+	// change summary and the new operation_version. Callers should pass the last `operation_version`
 	// they observed as `baseVersion` so the server can detect concurrent edits
 	// and respond with a structured `version_conflict` instead of clobbering.
 	async function applyOperations(changeRequestName, baseVersion, operations) {
-		return await applyOperationsResource.submit({
+		const result = await applyOperationsResource.submit({
 			name: changeRequestName,
 			base_version: baseVersion,
 			operations,
 		});
+		if (
+			result?.changes &&
+			currentChangeRequest.value?.name === changeRequestName
+		) {
+			changesResource.data = result.changes;
+		}
+		return result;
 	}
 
 	return {
@@ -315,9 +235,6 @@ export const useChangeRequestStore = defineStore('changeRequest', () => {
 		isSubmitting,
 		isArchiving,
 		isMerging,
-		isCreatingPage,
-		isUpdatingPage,
-		isDeletingPage,
 		refreshChangeRequest,
 		initChangeRequest,
 		ensureChangeRequest,
@@ -327,11 +244,6 @@ export const useChangeRequestStore = defineStore('changeRequest', () => {
 		archiveChangeRequest,
 		mergeChangeRequest,
 		approveAndMergeChangeRequest,
-		createPage,
-		updatePage,
-		deletePage,
-		movePage,
-		reorderChildren,
 		applyOperations,
 	};
 });

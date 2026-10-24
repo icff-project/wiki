@@ -1,13 +1,5 @@
-import { expect, test } from '@playwright/test';
-import { updateDoc } from '../helpers/frappe';
-import { APP_BASE, spaceLinkSelector } from '../helpers/routes';
-import {
-	createTestWikiDocument,
-	createTestWikiSpace,
-	deleteTestWikiDocument,
-	deleteTestWikiSpace,
-	openNewPageDialog,
-} from '../helpers/wiki';
+import { expect, test } from '../fixtures';
+import { createDraftAndOpenEditor } from '../helpers/wiki';
 
 /**
  * Covers the Mermaid diagram feature: the editor node (parse + live preview +
@@ -35,45 +27,16 @@ declare global {
 	}
 }
 
-/**
- * Create a draft page and open the editor. Mirrors the helper in
- * iframe-embed.spec.ts — duplicated here rather than exported so changes to one
- * test don't ripple into others.
- */
-async function createDraftAndOpenEditor(
-	page: import('@playwright/test').Page,
-	title: string,
-) {
-	await page.goto(APP_BASE);
-	await page.waitForLoadState('networkidle');
-
-	const spaceLink = page.locator(spaceLinkSelector()).first();
-	await expect(spaceLink).toBeVisible({ timeout: 5000 });
-	await spaceLink.click();
-	await page.waitForLoadState('networkidle');
-
-	await openNewPageDialog(page);
-
-	await page.getByLabel('Title').fill(title);
-	await page.getByRole('dialog').getByRole('button', { name: 'Save' }).click();
-	await page.waitForLoadState('networkidle');
-
-	await page.locator('aside').getByText(title, { exact: true }).click();
-
-	const editor = page.locator('.ProseMirror, [contenteditable="true"]');
-	await expect(editor).toBeVisible({ timeout: 10000 });
-
-	await page.waitForFunction(() => window.wikiEditor !== undefined, {
-		timeout: 10000,
-	});
-	return editor;
-}
-
 test.describe('Mermaid diagrams', () => {
 	test('parses a ```mermaid fence into a node and previews it as SVG', async ({
 		page,
+		wiki,
 	}) => {
-		await createDraftAndOpenEditor(page, `mermaid-edit-${Date.now()}`);
+		await createDraftAndOpenEditor(
+			page,
+			await wiki.space(),
+			`mermaid-edit-${Date.now()}`,
+		);
 
 		const code = await page.evaluate((md) => {
 			window.wikiEditor.commands.setContent(md, { contentType: 'markdown' });
@@ -86,13 +49,22 @@ test.describe('Mermaid diagrams', () => {
 		expect(code).toContain('flowchart TD');
 
 		// The node view renders a live SVG preview of the diagram.
-		await expect(page.locator('.mermaid-block-svg svg').first()).toBeVisible({
+		await expect(
+			page.locator('.mermaid-block .mermaid-diagram svg').first(),
+		).toBeVisible({
 			timeout: 10000,
 		});
 	});
 
-	test('round-trips the mermaid fence without drift', async ({ page }) => {
-		await createDraftAndOpenEditor(page, `mermaid-roundtrip-${Date.now()}`);
+	test('round-trips the mermaid fence without drift', async ({
+		page,
+		wiki,
+	}) => {
+		await createDraftAndOpenEditor(
+			page,
+			await wiki.space(),
+			`mermaid-roundtrip-${Date.now()}`,
+		);
 
 		const { md1, md2 } = await page.evaluate((md) => {
 			window.wikiEditor.commands.setContent(md, { contentType: 'markdown' });
@@ -112,8 +84,13 @@ test.describe('Mermaid diagrams', () => {
 
 	test('renders multiple diagrams independently without colliding', async ({
 		page,
+		wiki,
 	}) => {
-		await createDraftAndOpenEditor(page, `mermaid-multi-${Date.now()}`);
+		await createDraftAndOpenEditor(
+			page,
+			await wiki.space(),
+			`mermaid-multi-${Date.now()}`,
+		);
 
 		const twoDiagrams =
 			'```mermaid\nflowchart TD\n  A[Start] --> B[End]\n```\n\n' +
@@ -122,59 +99,93 @@ test.describe('Mermaid diagrams', () => {
 			window.wikiEditor.commands.setContent(md, { contentType: 'markdown' });
 		}, twoDiagrams);
 
-		// Both blocks must render their own SVG — a shared render id used to make
-		// one diagram render glitchy while the other stayed blank.
-		const svgs = page.locator('.mermaid-block-svg svg');
-		await expect(svgs).toHaveCount(2, { timeout: 10000 });
+		// Each block draws its own diagram: neither is blank, and neither shows
+		// the other's nodes.
+		const blocks = page.locator('.mermaid-block');
+		await expect(blocks.nth(0).locator('svg')).toContainText('Start', {
+			timeout: 10000,
+		});
+		await expect(blocks.nth(1).locator('svg')).toContainText('Z');
+		await expect(blocks.nth(1).locator('svg')).not.toContainText('Start');
+	});
 
-		const ids = await svgs.evaluateAll((nodes) =>
-			nodes.map((n) => (n as SVGElement).id),
+	test('keeps the last diagram and shows the error on invalid source', async ({
+		page,
+		wiki,
+	}) => {
+		await createDraftAndOpenEditor(
+			page,
+			await wiki.space(),
+			`mermaid-error-${Date.now()}`,
 		);
-		expect(new Set(ids).size).toBe(2); // distinct render ids
+
+		await page.evaluate((md) => {
+			window.wikiEditor.commands.setContent(md, { contentType: 'markdown' });
+		}, MERMAID_MARKDOWN);
+		const block = page.locator('.mermaid-block').first();
+		await expect(block.locator('svg')).toContainText('Start', {
+			timeout: 10000,
+		});
+
+		await block.locator('textarea').fill('flowchart TD\n  A --> [oops');
+
+		await expect(block.locator('.pele-error')).toBeVisible({ timeout: 5000 });
+		await expect(block.locator('svg')).toContainText('Start');
 	});
 
 	test('renders the diagram as inline SVG on the public page', async ({
 		page,
-		request,
+		wiki,
 	}) => {
-		const spaceRoute = `mermaid-space-${Date.now()}`;
-		const space = await createTestWikiSpace(request, {
-			route: spaceRoute,
-			is_published: true,
+		const space = await wiki.space({
+			pages: [{ title: 'Mermaid Page', content: MERMAID_MARKDOWN }],
 		});
-		const rootGroup = await createTestWikiDocument(request, {
-			title: 'Root',
-			route: `${spaceRoute}/root`,
-			is_group: true,
-			is_published: true,
+		const doc = space.page('Mermaid Page');
+
+		await page.goto(`/${doc.route}`);
+
+		// Server emits the fence as <pre class="mermaid">, not a code block.
+		const container = page.locator('#wiki-content .mermaid').first();
+		await expect(container).toBeAttached({ timeout: 10000 });
+
+		// mermaid-renderer.js lazy-loads Mermaid and hydrates it into an SVG.
+		await expect(
+			page.locator('#wiki-content .mermaid svg').first(),
+		).toBeVisible({ timeout: 15000 });
+	});
+
+	test('follows the page theme without redrawing the diagram', async ({
+		page,
+		wiki,
+	}) => {
+		const space = await wiki.space({
+			pages: [{ title: 'Mermaid Theme Page', content: MERMAID_MARKDOWN }],
 		});
-		await updateDoc(request, 'Wiki Space', space.name, {
-			root_group: rootGroup.name,
-		});
-		const doc = await createTestWikiDocument(request, {
-			title: 'Mermaid Page',
-			route: `${spaceRoute}/diagram`,
-			content: MERMAID_MARKDOWN,
-			is_published: true,
-			parent_wiki_document: rootGroup.name,
+		await page.goto(`/${space.page('Mermaid Theme Page').route}`);
+
+		const node = page
+			.locator('#wiki-content .mermaid svg :is(.pele-node, .node)')
+			.first();
+		await expect(node).toBeVisible({ timeout: 15000 });
+		const fillOf = () =>
+			node.evaluate(
+				(el) => getComputedStyle(el.querySelector('rect, polygon, path')).fill,
+			);
+
+		await page.evaluate(() =>
+			document.documentElement.setAttribute('data-theme', 'light'),
+		);
+		const lightFill = await fillOf();
+		await node.evaluate((el) => {
+			el.dataset.marker = 'same';
 		});
 
-		try {
-			await page.goto(`/${doc.route}`);
-			await page.waitForLoadState('networkidle');
+		await page.evaluate(() =>
+			document.documentElement.setAttribute('data-theme', 'dark'),
+		);
 
-			// Server emits the fence as <pre class="mermaid">, not a code block.
-			const container = page.locator('#wiki-content .mermaid').first();
-			await expect(container).toBeAttached({ timeout: 10000 });
-
-			// mermaid-renderer.js lazy-loads Mermaid and hydrates it into an SVG.
-			await expect(
-				page.locator('#wiki-content .mermaid svg').first(),
-			).toBeVisible({ timeout: 15000 });
-		} finally {
-			await deleteTestWikiDocument(request, doc.name).catch(() => {});
-			await deleteTestWikiDocument(request, rootGroup.name).catch(() => {});
-			await deleteTestWikiSpace(request, space.name).catch(() => {});
-		}
+		expect(await fillOf()).not.toBe(lightFill);
+		// Colors come from CSS variables, so the drawing is the same element.
+		await expect(node).toHaveAttribute('data-marker', 'same');
 	});
 });

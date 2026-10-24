@@ -9,18 +9,20 @@ hook entry points (query conditions + has_permission) and the role editor API.
 """
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from wiki.permissions import (
 	_accessible_space_names,
 	_is_manager,
 	can_contribute_to_space,
+	can_delete_space,
 	can_read_space,
 	can_write_space,
 	wiki_cr_has_permission,
 	wiki_document_has_permission,
 	wiki_space_has_permission,
 )
+from wiki.tests import WikiTestCase as IntegrationTestCase
+from wiki.tests.factory import make_space
 
 
 def _set_contributions(space: str, allow: bool) -> None:
@@ -57,22 +59,11 @@ def _ensure_user(email: str, roles: list[str]) -> str:
 
 
 def _make_space(test_case, name: str, roles: list[tuple[str, str]]) -> str:
-	root_group = frappe.get_doc({"doctype": "Wiki Document", "title": f"Root {name}", "is_group": 1}).insert(
-		ignore_permissions=True
+	space = make_space(
+		space_name=name,
+		route=frappe.scrub(name).replace("_", "-"),
+		roles=roles,
 	)
-	test_case._docs.append(root_group.name)
-
-	space = frappe.get_doc(
-		{
-			"doctype": "Wiki Space",
-			"space_name": name,
-			"route": frappe.scrub(name).replace("_", "-"),
-			"root_group": root_group.name,
-		}
-	)
-	for role, level in roles:
-		space.append("roles", {"role": role, "permission_level": level})
-	space.insert(ignore_permissions=True)
 	test_case._spaces.append(space.name)
 	return space.name
 
@@ -163,6 +154,21 @@ class TestWikiSpacePermissions(IntegrationTestCase):
 	def test_open_space_writable_only_by_approver(self):
 		self.assertTrue(can_write_space(self.open_space, self.approver))
 		self.assertFalse(can_write_space(self.open_space, self.outsider))
+
+	# --- can_delete_space ------------------------------------------------
+
+	def test_manager_deletes_any_space(self):
+		self.assertTrue(can_delete_space(self.restricted, self.manager))
+
+	def test_write_role_does_not_grant_delete(self):
+		self.assertFalse(can_delete_space(self.restricted, self.writer))
+
+	def test_read_role_does_not_grant_delete(self):
+		self.assertFalse(can_delete_space(self.restricted, self.reader))
+
+	def test_open_space_deletable_by_approver(self):
+		self.assertTrue(can_delete_space(self.open_space, self.approver))
+		self.assertFalse(can_delete_space(self.open_space, self.outsider))
 
 	# --- _accessible_space_names ----------------------------------------
 
@@ -362,3 +368,66 @@ class TestSpaceRolesAPI(IntegrationTestCase):
 		frappe.set_user(self.manager)
 		with self.assertRaises(frappe.PermissionError):
 			set_space_contributions(self.space, 0)
+
+
+REVISION_DOCTYPES = ("Wiki Revision", "Wiki Revision Item", "Wiki Content Blob", "Wiki Merge Conflict")
+
+
+class TestRevisionDataAccess(IntegrationTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_role(READER_ROLE)
+		_ensure_role(OTHER_ROLE)
+		cls.reader = _ensure_user("wsac_reader@example.com", ["Wiki User", READER_ROLE])
+		cls.outsider = _ensure_user("wsac_outsider@example.com", ["Wiki User", OTHER_ROLE])
+		cls.approver = _ensure_user("wsac_approver@example.com", ["Wiki User", "Wiki Approver"])
+		frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit
+
+	def setUp(self):
+		from wiki.frappe_wiki.doctype.wiki_change_request.wiki_change_request import (
+			create_change_request,
+			create_cr_page,
+			get_cr_page,
+		)
+
+		self._spaces = []
+		self.space = _make_space(self, "WSAC Revisions", [(READER_ROLE, "Read")])
+		root_key = frappe.db.get_value(
+			"Wiki Document", frappe.db.get_value("Wiki Space", self.space, "root_group"), "doc_key"
+		)
+
+		frappe.set_user(self.reader)
+		self.cr = create_change_request(self.space, "Reader draft")
+		doc_key = create_cr_page(self.cr.name, root_key, "Secret draft", content="secret text")
+		self.assertEqual(get_cr_page(self.cr.name, doc_key)["content"], "secret text")
+		self.root_key = root_key
+		frappe.set_user("Administrator")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for space in self._spaces:
+			if frappe.db.exists("Wiki Space", space):
+				frappe.delete_doc("Wiki Space", space, force=True)
+
+	def test_revision_items_cannot_be_inserted_directly(self):
+		for user in (self.reader, self.outsider, self.approver):
+			with self.subTest(user=user):
+				frappe.set_user(user)
+				item = frappe.get_doc(
+					{
+						"doctype": "Wiki Revision Item",
+						"revision": self.cr.head_revision,
+						"doc_key": frappe.generate_hash(length=12),
+						"title": "Injected",
+						"parent_key": self.root_key,
+					}
+				)
+				with self.assertRaises(frappe.PermissionError):
+					item.insert()
+
+	def test_non_managers_cannot_read_revision_data(self):
+		for user in (self.reader, self.outsider, self.approver):
+			for doctype in REVISION_DOCTYPES:
+				with self.subTest(user=user, doctype=doctype):
+					self.assertFalse(frappe.has_permission(doctype, "read", user=user))
